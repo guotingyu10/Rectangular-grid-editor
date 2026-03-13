@@ -261,10 +261,16 @@
   line-height: 1;
   user-select: none;
   color: #000000;
+  position: relative;
+  z-index: 2;
 }
 
 .gridCellMeta {
   color: #a8a8a8;
+}
+
+.gridCellSelected {
+  background: rgba(0, 120, 215, 0.25);
 }
 
 .gridCellActive {
