@@ -280,16 +280,46 @@ function App() {
     inputRef.current?.focus()
   }, [])
 
+  const copyToClipboard = useCallback(async (text: string) => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text)
+        return
+      }
+    } catch (err) {
+      void err
+    }
+
+    const el = inputRef.current
+    if (!el) return
+    const prevValue = el.value
+    const prevStart = el.selectionStart
+    const prevEnd = el.selectionEnd
+    el.value = text
+    el.select()
+    try {
+      document.execCommand('copy')
+    } catch (err) {
+      void err
+    }
+    el.value = prevValue
+    if (prevStart !== null && prevEnd !== null) el.setSelectionRange(prevStart, prevEnd)
+  }, [])
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== 'Alt') return
+      if (e.key !== 'Alt' && e.code !== 'AltLeft' && e.code !== 'AltRight') return
+      e.preventDefault()
+      e.stopPropagation()
       if (altHeldRef.current) return
       altHeldRef.current = true
       setAltHeld(true)
     }
 
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.key !== 'Alt') return
+      if (e.key !== 'Alt' && e.code !== 'AltLeft' && e.code !== 'AltRight') return
+      e.preventDefault()
+      e.stopPropagation()
       if (!altHeldRef.current) return
       altHeldRef.current = false
       setAltHeld(false)
@@ -301,12 +331,12 @@ function App() {
       setAltHeld(false)
     }
 
-    window.addEventListener('keydown', onKeyDown)
-    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('keydown', onKeyDown, { capture: true })
+    window.addEventListener('keyup', onKeyUp, { capture: true })
     window.addEventListener('blur', onBlur)
     return () => {
-      window.removeEventListener('keydown', onKeyDown)
-      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('keydown', onKeyDown, { capture: true } as AddEventListenerOptions)
+      window.removeEventListener('keyup', onKeyUp, { capture: true } as AddEventListenerOptions)
       window.removeEventListener('blur', onBlur)
     }
   }, [])
@@ -1339,28 +1369,41 @@ function App() {
     const blocks = textBlocks
     const idxA = findTextBlockIndexAt(selection.anchor.x, selection.anchor.y, blocks)
     const idxB = findTextBlockIndexAt(selection.focus.x, selection.focus.y, blocks)
-    if (idxA < 0 || idxA !== idxB) return new Set<string>()
-
-    const b = blocks[idxA]!
-    const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v))
-    const normalize = (p: { x: number; y: number }) => ({
-      x: clamp(p.x, b.contentX, b.contentX + b.width - 1),
-      y: clamp(p.y, b.contentY, b.contentY + b.height - 1),
-    })
-
-    const a = normalize(selection.anchor)
-    const f = normalize(selection.focus)
-
-    const toIndex = (p: { x: number; y: number }) => (p.y - b.contentY) * b.width + (p.x - b.contentX)
-    let start = toIndex(a)
-    let end = toIndex(f)
-    if (start > end) [start, end] = [end, start]
-
     const set = new Set<string>()
-    for (let i = start; i <= end; i++) {
-      const y = b.contentY + Math.floor(i / b.width)
-      const x = b.contentX + (i % b.width)
-      set.add(cellKey(x, y))
+
+    if (idxA >= 0 && idxA === idxB) {
+      const b = blocks[idxA]!
+      const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v))
+      const normalize = (p: { x: number; y: number }) => ({
+        x: clamp(p.x, b.contentX, b.contentX + b.width - 1),
+        y: clamp(p.y, b.contentY, b.contentY + b.height - 1),
+      })
+
+      const a = normalize(selection.anchor)
+      const f = normalize(selection.focus)
+
+      const toIndex = (p: { x: number; y: number }) =>
+        (p.y - b.contentY) * b.width + (p.x - b.contentX)
+      let start = toIndex(a)
+      let end = toIndex(f)
+      if (start > end) [start, end] = [end, start]
+
+      for (let i = start; i <= end; i++) {
+        const y = b.contentY + Math.floor(i / b.width)
+        const x = b.contentX + (i % b.width)
+        set.add(cellKey(x, y))
+      }
+      return set
+    }
+
+    const minX = Math.min(selection.anchor.x, selection.focus.x)
+    const maxX = Math.max(selection.anchor.x, selection.focus.x)
+    const minY = Math.min(selection.anchor.y, selection.focus.y)
+    const maxY = Math.max(selection.anchor.y, selection.focus.y)
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        set.add(cellKey(x, y))
+      }
     }
     return set
   }, [cellKey, findTextBlockIndexAt, selection, textBlocks])
@@ -1798,6 +1841,58 @@ function App() {
           }}
           onKeyDown={(e) => {
             if (e.nativeEvent.isComposing || composingRef.current) return
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
+              e.preventDefault()
+              const cells = cellsRef.current
+              const selKeys = selectedCellKeys
+              const sel = selectionRef.current
+              if (sel && selKeys.size > 0) {
+                const minX = Math.min(sel.anchor.x, sel.focus.x)
+                const maxX = Math.max(sel.anchor.x, sel.focus.x)
+                const minY = Math.min(sel.anchor.y, sel.focus.y)
+                const maxY = Math.max(sel.anchor.y, sel.focus.y)
+                const lines: string[] = []
+                for (let y = minY; y <= maxY; y++) {
+                  let rowFirst: number | null = null
+                  let rowLast: number | null = null
+                  for (let x = minX; x <= maxX; x++) {
+                    if (!selKeys.has(cellKey(x, y))) continue
+                    if (rowFirst === null) rowFirst = x
+                    rowLast = x
+                  }
+                  if (rowFirst === null || rowLast === null) continue
+                  let s = ''
+                  for (let x = rowFirst; x <= rowLast; x++) {
+                    if (!selKeys.has(cellKey(x, y))) {
+                      s += ' '
+                      continue
+                    }
+                    const v = cells[cellKey(x, y)]
+                    if (v === '\n') continue
+                    s += v ?? ' '
+                  }
+                  lines.push(s.replace(/\s+$/u, ''))
+                }
+                void copyToClipboard(lines.join('\n'))
+                return
+              }
+
+              const cur = cursorRef.current
+              const blocks = textBlocksRef.current
+              const idx = findTextBlockIndexAt(cur.x, cur.y, blocks)
+              if (idx >= 0) {
+                const b = blocks[idx]!
+                let s = ''
+                for (let x = b.contentX; x <= b.contentX + b.width - 1; x++) {
+                  const v = cells[cellKey(x, cur.y)]
+                  if (v === '\n') break
+                  s += v ?? ' '
+                }
+                void copyToClipboard(s.replace(/\s+$/u, ''))
+              }
+              return
+            }
+
             if (e.ctrlKey || e.metaKey) return
 
             const current = cursorRef.current
@@ -2303,6 +2398,9 @@ function App() {
             光标：<code>({cursor.x}, {cursor.y})</code>
           </div>
           <div>
+            缩放：<code>{Math.round(gridZoom * 100)}%</code>
+          </div>
+          <div>
             保存：<code>{hasPendingSaves ? '内容待保存' : '内容已保存'}</code>，<code>
               {hasPendingRenames ? '文件名待保存' : '文件名已保存'}
             </code>
@@ -2347,7 +2445,10 @@ function App() {
             const magnitude = Math.abs(e.deltaY)
             const sign = Math.sign(e.deltaY)
             if (magnitude === 0 || sign === 0) return
-            const steps = sign * Math.max(1, Math.round(magnitude / 100))
+            const zoom = gridZoomRef.current
+            if (!Number.isFinite(zoom) || zoom <= 0) return
+            const baseSteps = sign * Math.max(1, Math.round(magnitude / 100))
+            const steps = baseSteps / zoom
 
             if (e.shiftKey) {
               panX(steps)
@@ -2469,6 +2570,110 @@ function App() {
               gridTemplateRows: `repeat(${gridRange.ys.length}, ${gridCellSize}px)`,
               transform: `translate(${gridOffset.x}px, ${gridOffset.y}px) scale(${gridZoom})`,
             }}
+            onPointerDown={(e) => {
+              if (e.button !== 0) return
+              e.preventDefault()
+
+              const canvas = gridCanvasRef.current
+              if (!canvas) {
+                focusInput()
+                return
+              }
+              const rect = canvas.getBoundingClientRect()
+              if (rect.width <= 0 || rect.height <= 0) {
+                focusInput()
+                return
+              }
+
+              const cellSize = gridCellSizeRef.current
+              const zoom = gridZoomRef.current
+              if (!Number.isFinite(cellSize) || cellSize <= 0) {
+                focusInput()
+                return
+              }
+              if (!Number.isFinite(zoom) || zoom <= 0) {
+                focusInput()
+                return
+              }
+
+              const screenX = e.clientX - rect.left
+              const screenY = e.clientY - rect.top
+              const innerX = (screenX - gridOffset.x) / zoom
+              const innerY = (screenY - gridOffset.y) / zoom
+              const col = Math.floor(innerX / cellSize)
+              const row = Math.floor(innerY / cellSize)
+              const size = gridSizeRef.current
+              if (col < 0 || row < 0 || col >= size.cols || row >= size.rows) {
+                focusInput()
+                return
+              }
+
+              const topLeft = viewTopLeftRef.current
+              const x = Math.floor(topLeft.x) + col
+              const y = Math.floor(topLeft.y) + row
+
+              const prev = cursorRef.current
+              if (e.altKey && openFolderState.status === 'ready') {
+                if (selectionRef.current) setSelection(null)
+                if (hasPendingRenames) {
+                  const blocks = textBlocksRef.current
+                  const prevIdx = findTextBlockIndexAtFileNameRow(prev.x, prev.y, blocks)
+                  if (prevIdx >= 0) {
+                    const nextIdx = findTextBlockIndexAtFileNameRow(x, y, blocks)
+                    if (nextIdx < 0) void flushDirtyTextBlockRenames()
+                  }
+                }
+
+                const blocks = textBlocksRef.current
+                const idx = findTextBlockIndexAt(x, y, blocks)
+                if (idx >= 0) {
+                  const b = blocks[idx]!
+                  const cellWidth = cellSize * zoom
+                  const cellHeight = cellSize * zoom
+                  if (Number.isFinite(cellWidth) && Number.isFinite(cellHeight)) {
+                    blockDragRef.current = {
+                      active: true,
+                      pointerId: e.pointerId,
+                      blockId: b.id,
+                      startClientX: e.clientX,
+                      startClientY: e.clientY,
+                      lastDx: 0,
+                      lastDy: 0,
+                      cellWidth,
+                      cellHeight,
+                    }
+                    setIsBlockDragging(true)
+                    e.currentTarget.setPointerCapture(e.pointerId)
+                  }
+                  const next = { x, y }
+                  setCursor(next)
+                  cursorRef.current = next
+                  focusInput()
+                  return
+                }
+              }
+
+              maybeCreateTextFileFromTokenAt(prev)
+              if (hasPendingRenames) {
+                const blocks = textBlocksRef.current
+                const prevIdx = findTextBlockIndexAtFileNameRow(prev.x, prev.y, blocks)
+                if (prevIdx >= 0) {
+                  const nextIdx = findTextBlockIndexAtFileNameRow(x, y, blocks)
+                  if (nextIdx < 0) void flushDirtyTextBlockRenames()
+                }
+              }
+
+              const next = { x, y }
+              setCursor(next)
+              cursorRef.current = next
+              if (e.shiftKey) {
+                const anchor = selectionRef.current?.anchor ?? prev
+                setSelection({ anchor, focus: next })
+              } else if (selectionRef.current) {
+                setSelection(null)
+              }
+              focusInput()
+            }}
           >
             {gridRange.ys.flatMap((y) =>
               gridRange.xs.map((x) => {
@@ -2502,77 +2707,6 @@ function App() {
                     className={`gridCell${selected ? ' gridCellSelected' : ''}${active ? ' gridCellActive' : ''}`}
                     title={`(${x}, ${y})`}
                     style={borderStyle}
-                    onPointerDown={(e) => {
-                      if (e.button !== 0) {
-                        e.preventDefault()
-                        return
-                      }
-                      e.preventDefault()
-                      const prev = cursorRef.current
-                      if (e.altKey && openFolderState.status === 'ready') {
-                        if (selectionRef.current) setSelection(null)
-                        if (hasPendingRenames) {
-                          const blocks = textBlocksRef.current
-                          const prevIdx = findTextBlockIndexAtFileNameRow(prev.x, prev.y, blocks)
-                          if (prevIdx >= 0) {
-                            const nextIdx = findTextBlockIndexAtFileNameRow(x, y, blocks)
-                            if (nextIdx < 0) void flushDirtyTextBlockRenames()
-                          }
-                        }
-
-                        const blocks = textBlocksRef.current
-                        const idx = findTextBlockIndexAt(x, y, blocks)
-                        if (idx >= 0) {
-                          const b = blocks[idx]!
-                          const baseCell = gridCellSizeRef.current
-                          const zoom = gridZoomRef.current
-                          const cellWidth = baseCell * zoom
-                          const cellHeight = baseCell * zoom
-                          if (Number.isFinite(cellWidth) && Number.isFinite(cellHeight)) {
-                            blockDragRef.current = {
-                              active: true,
-                              pointerId: e.pointerId,
-                              blockId: b.id,
-                              startClientX: e.clientX,
-                              startClientY: e.clientY,
-                              lastDx: 0,
-                              lastDy: 0,
-                              cellWidth,
-                              cellHeight,
-                            }
-                            setIsBlockDragging(true)
-                            e.currentTarget.setPointerCapture(e.pointerId)
-                          }
-                          const next = { x, y }
-                          setCursor(next)
-                          cursorRef.current = next
-                          focusInput()
-                          return
-                        }
-                      }
-                      maybeCreateTextFileFromTokenAt(prev)
-                      if (hasPendingRenames) {
-                        const blocks = textBlocksRef.current
-                        const prevIdx = findTextBlockIndexAtFileNameRow(prev.x, prev.y, blocks)
-                        if (prevIdx >= 0) {
-                          const nextIdx = findTextBlockIndexAtFileNameRow(x, y, blocks)
-                          if (nextIdx < 0) void flushDirtyTextBlockRenames()
-                        }
-                      }
-                      const next = { x, y }
-                      setCursor(next)
-                      cursorRef.current = next
-                      if (e.shiftKey) {
-                        const anchor = selectionRef.current?.anchor ?? prev
-                        setSelection({ anchor, focus: next })
-                      } else if (selectionRef.current) {
-                        setSelection(null)
-                      }
-                      focusInput()
-                    }}
-                    onContextMenu={(e) => {
-                      e.preventDefault()
-                    }}
                   >
                     {isSpace || isNewline ? (
                       <span className="gridCellMeta">{displayValue}</span>
