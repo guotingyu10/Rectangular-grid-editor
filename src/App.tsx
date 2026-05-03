@@ -196,6 +196,92 @@ async function ensureElementPositionJsonFile(
   }
 }
 
+const LAST_FOLDER_DB_NAME = 'rectangular-grid-editor'
+const LAST_FOLDER_STORE_NAME = 'lastFolder'
+const LAST_FOLDER_KEY = 'lastFolderHandle'
+
+function saveLastFolderHandle(handle: FileSystemDirectoryHandle): void {
+  try {
+    const request = indexedDB.open(LAST_FOLDER_DB_NAME, 1)
+    request.onupgradeneeded = () => {
+      const db = request.result
+      if (!db.objectStoreNames.contains(LAST_FOLDER_STORE_NAME)) {
+        db.createObjectStore(LAST_FOLDER_STORE_NAME)
+      }
+    }
+    request.onsuccess = () => {
+      const db = request.result
+      const tx = db.transaction(LAST_FOLDER_STORE_NAME, 'readwrite')
+      const store = tx.objectStore(LAST_FOLDER_STORE_NAME)
+      store.put(handle, LAST_FOLDER_KEY)
+      db.close()
+    }
+    request.onerror = () => {
+      // ignore
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function loadLastFolderHandle(): Promise<FileSystemDirectoryHandle | null> {
+  return new Promise((resolve) => {
+    try {
+      const request = indexedDB.open(LAST_FOLDER_DB_NAME, 1)
+      request.onupgradeneeded = () => {
+        const db = request.result
+        if (!db.objectStoreNames.contains(LAST_FOLDER_STORE_NAME)) {
+          db.createObjectStore(LAST_FOLDER_STORE_NAME)
+        }
+      }
+      request.onsuccess = () => {
+        const db = request.result
+        if (!db.objectStoreNames.contains(LAST_FOLDER_STORE_NAME)) {
+          db.close()
+          resolve(null)
+          return
+        }
+        const tx = db.transaction(LAST_FOLDER_STORE_NAME, 'readonly')
+        const store = tx.objectStore(LAST_FOLDER_STORE_NAME)
+        const getRequest = store.get(LAST_FOLDER_KEY)
+        getRequest.onsuccess = () => {
+          db.close()
+          resolve(getRequest.result ?? null)
+        }
+        getRequest.onerror = () => {
+          db.close()
+          resolve(null)
+        }
+      }
+      request.onerror = () => {
+        resolve(null)
+      }
+    } catch {
+      resolve(null)
+    }
+  })
+}
+
+// function isHalfWidthChar(ch: string): boolean {
+//   if (ch >= 'a' && ch <= 'z') return true
+//   if (ch >= 'A' && ch <= 'Z') return true
+//   if (ch >= '0' && ch <= '9') return true
+//   if (' \t\n\r`~!@#$%^&*()-_=+[{]}\\|;:\'",.<>?/'.includes(ch)) return true
+//   return false
+// }
+
+// function charGridWidth(): number {
+//   return 1
+// }
+
+// function textGridWidth(text: string): number {
+//   let w = 0
+//   for (const ch of text) {
+//     w += charGridWidth()
+//   }
+//   return w
+// }
+
 function App() {
   const [openFolderState, setOpenFolderState] = useState<OpenFolderState>({
     status: 'idle',
@@ -272,6 +358,8 @@ function App() {
   const gridCellSizeRef = useRef(gridCellSize)
   const [gridCellFontSize, setGridCellFontSize] = useState(14)
   const gridCellFontSizeRef = useRef(gridCellFontSize)
+  const [gridCellHalfFontSize, setGridCellHalfFontSize] = useState(28)
+  const gridCellHalfFontSizeRef = useRef(gridCellHalfFontSize)
   const measureCanvasRef = useRef<HTMLCanvasElement | null>(null)
 
   const cellKey = useCallback((x: number, y: number) => `${x},${y}`, [])
@@ -1177,6 +1265,14 @@ function App() {
     return 'showDirectoryPicker' in window
   }, [])
 
+  const lastFolderHandleRef = useRef<FileSystemDirectoryHandle | null>(null)
+
+  useEffect(() => {
+    void loadLastFolderHandle().then((handle) => {
+      lastFolderHandleRef.current = handle
+    })
+  }, [])
+
   const openFolder = useCallback(async () => {
     if (!('showDirectoryPicker' in window)) {
       setOpenFolderState({
@@ -1207,9 +1303,15 @@ function App() {
         window as unknown as {
           showDirectoryPicker: (options?: {
             mode?: 'read' | 'readwrite'
+            startIn?: FileSystemHandle
           }) => Promise<FileSystemDirectoryHandle>
         }
-      ).showDirectoryPicker({ mode: 'readwrite' })
+      ).showDirectoryPicker({
+        mode: 'readwrite',
+        startIn: lastFolderHandleRef.current ?? undefined,
+      })
+      lastFolderHandleRef.current = directoryHandle
+      saveLastFolderHandle(directoryHandle)
 
       const files = await listFilesRecursively(directoryHandle, '')
       const ensured = await ensureElementPositionJsonFile(directoryHandle)
@@ -1556,40 +1658,89 @@ function App() {
     const probeSize = 100
     ctx.font = `${probeSize}px ${mono}`
 
-    const chars = new Set<string>()
-    for (const v of Object.values(cellsRef.current)) {
-      if (!v || v === ' ' || v === '\n') continue
-      chars.add(v)
-      if (chars.size >= 256) break
+    const isHalfWidthChar = (ch: string): boolean => {
+      const code = ch.charCodeAt(0)
+      if (code <= 0x7f) return true
+      if (code >= 0xff01 && code <= 0xff5e) return true
+      if (code === 0x3000) return false
+      if (code >= 0x3000 && code <= 0x303f) return false
+      if (code >= 0xff01 && code <= 0xffef) {
+        if (code >= 0xff21 && code <= 0xff3a) return true
+        if (code >= 0xff41 && code <= 0xff5a) return true
+        if (code >= 0xff10 && code <= 0xff19) return true
+        return false
+      }
+      return false
     }
 
-    if (chars.size === 0) {
-      const fallback = Math.max(1, cellSize * 0.9)
-      if (gridCellFontSizeRef.current !== fallback) setGridCellFontSize(fallback)
-      return
+    const halfChars = new Set<string>()
+    const fullChars = new Set<string>()
+    for (const v of Object.values(cellsRef.current)) {
+      if (!v || v === ' ' || v === '\n') continue
+      if (isHalfWidthChar(v)) {
+        halfChars.add(v)
+      } else {
+        fullChars.add(v)
+      }
+      if (halfChars.size >= 128 && fullChars.size >= 128) break
     }
 
     const target = cellSize * 0.96
-    let next = Number.POSITIVE_INFINITY
-    for (const ch of chars) {
-      const m = ctx.measureText(ch)
-      const w =
-        Number.isFinite(m.actualBoundingBoxLeft) && Number.isFinite(m.actualBoundingBoxRight)
-          ? m.actualBoundingBoxLeft + m.actualBoundingBoxRight
-          : Math.max(1, m.width)
-      const h =
-        Number.isFinite(m.actualBoundingBoxAscent) && Number.isFinite(m.actualBoundingBoxDescent)
-          ? m.actualBoundingBoxAscent + m.actualBoundingBoxDescent
-          : probeSize
-      if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) continue
-      const scale = Math.min(target / w, target / h)
-      const fit = probeSize * scale
-      if (fit < next) next = fit
+    const halfTarget = cellSize * 2.0
+
+    let fullFontSize = cellSize * 0.9
+    if (fullChars.size > 0) {
+      let next = Number.POSITIVE_INFINITY
+      for (const ch of fullChars) {
+        const m = ctx.measureText(ch)
+        const w =
+          Number.isFinite(m.actualBoundingBoxLeft) && Number.isFinite(m.actualBoundingBoxRight)
+            ? m.actualBoundingBoxLeft + m.actualBoundingBoxRight
+            : Math.max(1, m.width)
+        const h =
+          Number.isFinite(m.actualBoundingBoxAscent) && Number.isFinite(m.actualBoundingBoxDescent)
+            ? m.actualBoundingBoxAscent + m.actualBoundingBoxDescent
+            : probeSize
+        if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) continue
+        const scale = Math.min(target / w, target / h)
+        const fit = probeSize * scale
+        if (fit < next) next = fit
+      }
+      if (Number.isFinite(next) && next > 0) {
+        fullFontSize = Math.max(1, Math.min(cellSize, next))
+      }
     }
 
-    if (!Number.isFinite(next) || next <= 0) return
-    const clamped = Math.max(1, Math.min(cellSize, next))
-    if (gridCellFontSizeRef.current !== clamped) setGridCellFontSize(clamped)
+    let halfFontSize = cellSize * 0.9
+    if (halfChars.size > 0) {
+      let next = Number.POSITIVE_INFINITY
+      for (const ch of halfChars) {
+        const m = ctx.measureText(ch)
+        const w =
+          Number.isFinite(m.actualBoundingBoxLeft) && Number.isFinite(m.actualBoundingBoxRight)
+            ? m.actualBoundingBoxLeft + m.actualBoundingBoxRight
+            : Math.max(1, m.width)
+        const h =
+          Number.isFinite(m.actualBoundingBoxAscent) && Number.isFinite(m.actualBoundingBoxDescent)
+            ? m.actualBoundingBoxAscent + m.actualBoundingBoxDescent
+            : probeSize
+        if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) continue
+        const scale = Math.min(halfTarget / w, halfTarget / h)
+        const fit = probeSize * scale
+        if (fit < next) next = fit
+      }
+      if (Number.isFinite(next) && next > 0) {
+        halfFontSize = Math.max(1, Math.min(cellSize * 2, next))
+      }
+    }
+
+    const halfClamped = Math.max(1, Math.min(cellSize * 2, halfFontSize))
+    const fullClamped = Math.max(1, Math.min(cellSize, fullFontSize))
+
+    if (gridCellFontSizeRef.current !== fullClamped || gridCellHalfFontSizeRef.current !== halfClamped) {
+      setGridCellFontSize(fullClamped)
+      setGridCellHalfFontSize(halfClamped)
+    }
   }, [openFolderState.status])
 
   const updateImeBox = useCallback(() => {
@@ -1672,6 +1823,100 @@ function App() {
     return () => cancelAnimationFrame(raf)
   }, [cells, gridCellSize, openFolderState.status, updateGridCellFontSize])
 
+  useEffect(() => {
+    if (openFolderState.status !== 'ready') return
+
+    const canvas = gridCanvasRef.current
+    if (!canvas) return
+
+    const handleWheel = (e: WheelEvent) => {
+      const rightHeld =
+        rightButtonDownRef.current ||
+        ((e as unknown as { buttons?: number }).buttons ?? 0) === 2 ||
+        (((e as unknown as { buttons?: number }).buttons ?? 0) & 2) === 2
+
+      if (e.ctrlKey || rightHeld) {
+        e.preventDefault()
+        const raw = e.deltaY
+        if (raw === 0) return
+        const factor = Math.pow(1.12, -raw / 100)
+        zoomByFactor(factor)
+        return
+      }
+
+      e.preventDefault()
+      const magnitude = Math.abs(e.deltaY)
+      const sign = Math.sign(e.deltaY)
+      if (magnitude === 0 || sign === 0) return
+      const zoom = gridZoomRef.current
+      if (!Number.isFinite(zoom) || zoom <= 0) return
+      const baseSteps = sign * Math.max(1, Math.round(magnitude / 100))
+      const steps = baseSteps / zoom
+
+      if (e.shiftKey) {
+        setViewTopLeft((prev) => ({ x: prev.x + steps, y: prev.y }))
+        return
+      }
+
+      setViewTopLeft((prev) => ({ x: prev.x, y: prev.y + steps }))
+    }
+
+    canvas.addEventListener('wheel', handleWheel, { passive: false })
+    return () => {
+      canvas.removeEventListener('wheel', handleWheel)
+    }
+  }, [openFolderState.status, zoomByFactor])
+
+  const handleCellClick = useCallback((cellX: number, cellY: number, e: React.PointerEvent) => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    e.stopPropagation()
+
+    const prev = cursorRef.current
+    if (e.altKey && openFolderState.status === 'ready') {
+      if (selectionRef.current) setSelection(null)
+      if (hasPendingRenames) {
+        const blocks = textBlocksRef.current
+        const prevIdx = findTextBlockIndexAtFileNameRow(prev.x, prev.y, blocks)
+        if (prevIdx >= 0) {
+          const nextIdx = findTextBlockIndexAtFileNameRow(cellX, cellY, blocks)
+          if (nextIdx < 0) void flushDirtyTextBlockRenames()
+        }
+      }
+
+      const blocks = textBlocksRef.current
+      const idx = findTextBlockIndexAt(cellX, cellY, blocks)
+      if (idx >= 0) {
+        const next = { x: cellX, y: cellY }
+        setCursor(next)
+        cursorRef.current = next
+        focusInput()
+        return
+      }
+    }
+
+    maybeCreateTextFileFromTokenAt(prev)
+    if (hasPendingRenames) {
+      const blocks = textBlocksRef.current
+      const prevIdx = findTextBlockIndexAtFileNameRow(prev.x, prev.y, blocks)
+      if (prevIdx >= 0) {
+        const nextIdx = findTextBlockIndexAtFileNameRow(cellX, cellY, blocks)
+        if (nextIdx < 0) void flushDirtyTextBlockRenames()
+      }
+    }
+
+    const next = { x: cellX, y: cellY }
+    setCursor(next)
+    cursorRef.current = next
+    if (e.shiftKey) {
+      const anchor = selectionRef.current?.anchor ?? prev
+      setSelection({ anchor, focus: next })
+    } else if (selectionRef.current) {
+      setSelection(null)
+    }
+    focusInput()
+  }, [findTextBlockIndexAt, findTextBlockIndexAtFileNameRow, flushDirtyTextBlockRenames, focusInput, hasPendingRenames, maybeCreateTextFileFromTokenAt, openFolderState.status])
+
   const summary = useMemo(() => {
     if (openFolderState.status !== 'ready') return null
     const txtCount = openFolderState.files.filter((f) =>
@@ -1703,28 +1948,6 @@ function App() {
       window.visualViewport?.removeEventListener('resize', updateScale)
     }
   }, [])
-
-  useEffect(() => {
-    if (openFolderState.status !== 'ready') return
-
-    const onWheel = (e: WheelEvent) => {
-      const rightHeld =
-        rightButtonDownRef.current ||
-        ((e as unknown as { buttons?: number }).buttons ?? 0) === 2 ||
-        (((e as unknown as { buttons?: number }).buttons ?? 0) & 2) === 2
-      if (!e.ctrlKey && !rightHeld) return
-      e.preventDefault()
-      const raw = e.deltaY
-      if (raw === 0) return
-      const factor = Math.pow(1.12, -raw / 100)
-      zoomByFactor(factor)
-    }
-
-    window.addEventListener('wheel', onWheel, { passive: false, capture: true })
-    return () => {
-      window.removeEventListener('wheel', onWheel, true)
-    }
-  }, [openFolderState.status, zoomByFactor])
 
   useEffect(() => {
     if (openFolderState.status !== 'ready') return
@@ -2434,29 +2657,6 @@ function App() {
           onContextMenu={(e) => {
             e.preventDefault()
           }}
-          onWheel={(e) => {
-            e.preventDefault()
-
-            const rightHeld =
-              rightButtonDownRef.current || (((e as unknown as { buttons?: number }).buttons ?? 0) & 2) === 2
-
-            if (e.ctrlKey || rightHeld) return
-
-            const magnitude = Math.abs(e.deltaY)
-            const sign = Math.sign(e.deltaY)
-            if (magnitude === 0 || sign === 0) return
-            const zoom = gridZoomRef.current
-            if (!Number.isFinite(zoom) || zoom <= 0) return
-            const baseSteps = sign * Math.max(1, Math.round(magnitude / 100))
-            const steps = baseSteps / zoom
-
-            if (e.shiftKey) {
-              panX(steps)
-              return
-            }
-
-            panY(steps)
-          }}
           onPointerDown={(e) => {
             if (e.button === 2) {
               e.preventDefault()
@@ -2565,114 +2765,10 @@ function App() {
             className="gridCanvasInner"
             style={{
               width: gridRange.xs.length * gridCellSize,
-              height: gridRange.ys.length * gridCellSize,
+              height: gridRange.ys.length * gridCellSize * 2,
               gridTemplateColumns: `repeat(${gridRange.xs.length}, ${gridCellSize}px)`,
-              gridTemplateRows: `repeat(${gridRange.ys.length}, ${gridCellSize}px)`,
+              gridTemplateRows: `repeat(${gridRange.ys.length}, ${gridCellSize * 2}px)`,
               transform: `translate(${gridOffset.x}px, ${gridOffset.y}px) scale(${gridZoom})`,
-            }}
-            onPointerDown={(e) => {
-              if (e.button !== 0) return
-              e.preventDefault()
-
-              const canvas = gridCanvasRef.current
-              if (!canvas) {
-                focusInput()
-                return
-              }
-              const rect = canvas.getBoundingClientRect()
-              if (rect.width <= 0 || rect.height <= 0) {
-                focusInput()
-                return
-              }
-
-              const cellSize = gridCellSizeRef.current
-              const zoom = gridZoomRef.current
-              if (!Number.isFinite(cellSize) || cellSize <= 0) {
-                focusInput()
-                return
-              }
-              if (!Number.isFinite(zoom) || zoom <= 0) {
-                focusInput()
-                return
-              }
-
-              const screenX = e.clientX - rect.left
-              const screenY = e.clientY - rect.top
-              const innerX = (screenX - gridOffset.x) / zoom
-              const innerY = (screenY - gridOffset.y) / zoom
-              const col = Math.floor(innerX / cellSize)
-              const row = Math.floor(innerY / cellSize)
-              const size = gridSizeRef.current
-              if (col < 0 || row < 0 || col >= size.cols || row >= size.rows) {
-                focusInput()
-                return
-              }
-
-              const topLeft = viewTopLeftRef.current
-              const x = Math.floor(topLeft.x) + col
-              const y = Math.floor(topLeft.y) + row
-
-              const prev = cursorRef.current
-              if (e.altKey && openFolderState.status === 'ready') {
-                if (selectionRef.current) setSelection(null)
-                if (hasPendingRenames) {
-                  const blocks = textBlocksRef.current
-                  const prevIdx = findTextBlockIndexAtFileNameRow(prev.x, prev.y, blocks)
-                  if (prevIdx >= 0) {
-                    const nextIdx = findTextBlockIndexAtFileNameRow(x, y, blocks)
-                    if (nextIdx < 0) void flushDirtyTextBlockRenames()
-                  }
-                }
-
-                const blocks = textBlocksRef.current
-                const idx = findTextBlockIndexAt(x, y, blocks)
-                if (idx >= 0) {
-                  const b = blocks[idx]!
-                  const cellWidth = cellSize * zoom
-                  const cellHeight = cellSize * zoom
-                  if (Number.isFinite(cellWidth) && Number.isFinite(cellHeight)) {
-                    blockDragRef.current = {
-                      active: true,
-                      pointerId: e.pointerId,
-                      blockId: b.id,
-                      startClientX: e.clientX,
-                      startClientY: e.clientY,
-                      lastDx: 0,
-                      lastDy: 0,
-                      cellWidth,
-                      cellHeight,
-                    }
-                    setIsBlockDragging(true)
-                    e.currentTarget.setPointerCapture(e.pointerId)
-                  }
-                  const next = { x, y }
-                  setCursor(next)
-                  cursorRef.current = next
-                  focusInput()
-                  return
-                }
-              }
-
-              maybeCreateTextFileFromTokenAt(prev)
-              if (hasPendingRenames) {
-                const blocks = textBlocksRef.current
-                const prevIdx = findTextBlockIndexAtFileNameRow(prev.x, prev.y, blocks)
-                if (prevIdx >= 0) {
-                  const nextIdx = findTextBlockIndexAtFileNameRow(x, y, blocks)
-                  if (nextIdx < 0) void flushDirtyTextBlockRenames()
-                }
-              }
-
-              const next = { x, y }
-              setCursor(next)
-              cursorRef.current = next
-              if (e.shiftKey) {
-                const anchor = selectionRef.current?.anchor ?? prev
-                setSelection({ anchor, focus: next })
-              } else if (selectionRef.current) {
-                setSelection(null)
-              }
-              focusInput()
             }}
           >
             {gridRange.ys.flatMap((y) =>
@@ -2706,7 +2802,15 @@ function App() {
                     key={`${x},${y}`}
                     className={`gridCell${selected ? ' gridCellSelected' : ''}${active ? ' gridCellActive' : ''}`}
                     title={`(${x}, ${y})`}
-                    style={borderStyle}
+                    style={{
+                      ...borderStyle,
+                      fontSize: isSpace || isNewline
+                        ? undefined
+                        : value.charCodeAt(0) <= 0x7f || (value.charCodeAt(0) >= 0xff01 && value.charCodeAt(0) <= 0xff5e)
+                          ? gridCellHalfFontSize
+                          : undefined,
+                    }}
+                    onPointerDown={(e) => handleCellClick(x, y, e)}
                   >
                     {isSpace || isNewline ? (
                       <span className="gridCellMeta">{displayValue}</span>

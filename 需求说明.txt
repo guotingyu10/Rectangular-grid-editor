@@ -109,12 +109,18 @@ shift+滚轮设为左右滚动
 如何将这个应用作为Electorn桌面端启动,Windows
 
 
+wasted:
+将这些网格的宽度：高度 设为 1:2,英文字母,英文符号(包括空格,换行符),数字占一个网格宽度;其他所有符号(汉字,汉字标点全部占2网格宽度)
 
-npm config set electron_mirror https://npmmirror.com/mirrors/electron/
+
+将所有字符的宽度都设置为一个单元格的宽度;(包括汉语符号和其他符号);所有文字的宽度刚好占满一个单元格的宽度;
+2026.4.19-1.24.46.png11122222
+
 
 http://localhost:5173/
 npm run electron:dev
 npm install
 npm run dev
 
+npm config set electron_mirror https://npmmirror.com/mirrors/electron/
 
